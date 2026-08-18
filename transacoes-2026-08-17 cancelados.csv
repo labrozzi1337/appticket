@@ -1,0 +1,7 @@
+﻿ID Transação;ID Cliente;Email;Nome;Origem;Data;Status;Data Última Atualização;Qtd Tickets;Forma Pagto.;Desconto;Total;Taxa AppTicket;Líquido
+1556322;110089590;nathalia@appticket.com.br;Nathalia Garcias;web;17/08/2026 15:06;Cancelamento;17/08/2026 18:11;1;Pix;"0,0000";"497,9900";"35,7800";"462,2100"
+1501526;110594804;s.rosa@gescrap.com.br;SONIA MARIA ROSA;web;14/07/2026 22:50;Cancelamento;31/07/2026 09:08;1;BoletoBancario;"0,0000";"997,9900";"70,7800";"927,2100"
+1494691;110592738;anamarquesmm72@gmail.com;Ana carolina Cabral;web;09/07/2026 11:03;Cancelamento;29/07/2026 22:18;1;BoletoBancario;"0,0000";"497,9900";"35,7800";"462,2100"
+1492181;110591920;abalestra@tecnologiagto.com.br;AGATA JULIA BALESTRA DIAS;web;08/07/2026 09:13;Cancelamento;28/07/2026 22:20;1;BoletoBancario;"0,0000";"497,0000";"34,7900";"462,2100"
+1491892;110591839;cintia.mondaini@gmail.com;Cintia Mondaini da Silva;web;07/07/2026 23:46;Cancelamento;27/07/2026 22:13;1;BoletoBancario;"0,0000";"997,0000";"69,7900";"927,2100"
+1489701;110089590;nathalia@appticket.com.br;Nathalia Garcias;web;06/07/2026 13:13;Cancelamento;06/07/2026 16:15;1;Pix;"0,0000";"497,0000";"34,7900";"462,2100"
