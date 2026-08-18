@@ -1,15 +1,9 @@
-"""Painel de transacoes - AppTicket.
+"""Painel de transacoes do AppTicket, executavel localmente e na Vercel."""
+import base64, contextlib, csv, hashlib, hmac, io, json, os, secrets, sqlite3, sys, time, urllib.error, urllib.parse, urllib.request
 
-A coleta roda no NAVEGADOR (script colado no console), porque os cookies de
-sessao sao HttpOnly e nao podem ser copiados. Este app so guarda e exibe.
-
-A fila vem do proprio painel: /api/kpi/<evento>/transaction/list (TODAS as
-transacoes, todos os status). Cada uma e enriquecida com detail + getOrder.
-
-Uso:  python app.py        -> http://localhost:8000
-      python app.py test   -> self-check
-"""
-import contextlib, csv, http.cookies, http.server, io, json, os, secrets, sqlite3, sys, time, urllib.error, urllib.parse, urllib.request
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(DIR, "dados.db")
@@ -17,8 +11,6 @@ EVENTO = "36766"
 COLS = ["id_transacao", "id_presence", "nome", "cpf", "email", "telefone", "cargo", "tipo_ingresso",
         "qtde_tickets", "total", "liquido", "desconto", "pagamento", "status", "status_code", "status_api",
         "origem", "data", "erro"]
-SESSOES = {}
-TOKENS_COLETA = {}
 
 
 def carregar_env():
@@ -35,6 +27,14 @@ def carregar_env():
 
 
 carregar_env()
+
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 
 # ---------- banco ----------
@@ -66,18 +66,90 @@ def db():
         c.close()
 
 
+def usar_supabase():
+    """Na Vercel o filesystem e efemero; localmente o SQLite continua disponivel."""
+    return os.environ.get("STORAGE_BACKEND", "supabase" if os.environ.get("VERCEL") else "sqlite").lower() == "supabase"
+
+
+def _supabase(method, recurso, query="", body=None, prefer=None, alcance=None):
+    url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    chave = os.environ.get("SUPABASE_SECRET_KEY", "")
+    schema = os.environ.get("SUPABASE_SCHEMA", "appticket")
+    if not url or not chave or "SUBSTITUA" in url or "SUBSTITUA" in chave:
+        raise RuntimeError("Configure SUPABASE_URL e SUPABASE_SECRET_KEY no ambiente.")
+    headers = {"apikey": chave, "Content-Type": "application/json"}
+    # Chaves service_role antigas sao JWTs; as novas sb_secret_* autenticam pelo apikey.
+    if chave.startswith("eyJ"):
+        headers["Authorization"] = "Bearer " + chave
+    headers["Accept-Profile" if method == "GET" else "Content-Profile"] = schema
+    if prefer:
+        headers["Prefer"] = prefer
+    if alcance:
+        headers["Range"] = alcance
+    dados = None if body is None else json.dumps(body, ensure_ascii=False).encode()
+    req = urllib.request.Request(f"{url}/rest/v1/{recurso}{query}", data=dados, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as res:
+            bruto = res.read()
+            return json.loads(bruto) if bruto else None
+    except urllib.error.HTTPError as e:
+        detalhe = e.read().decode("utf-8", "replace")
+        raise RuntimeError(f"Supabase retornou HTTP {e.code}: {detalhe[:500]}") from e
+
+
+def _listar_supabase(query):
+    objetos = []
+    while True:
+        inicio = len(objetos)
+        lote = _supabase("GET", "transacoes", query, alcance=f"{inicio}-{inicio + 999}") or []
+        objetos.extend(lote)
+        if len(lote) < 1000:
+            return objetos
+
+
+def carregar_dados():
+    if usar_supabase():
+        campos = urllib.parse.quote(",".join(COLS), safe=",")
+        objetos = _listar_supabase(f"?select={campos}&order=data.desc")
+        rows = [[obj.get(k) for k in COLS] for obj in objetos]
+        return rows, sum(bool(obj.get("erro")) for obj in objetos)
+    with db() as c:
+        rows = c.execute(f"SELECT {','.join(COLS)} FROM resultado ORDER BY data DESC").fetchall()
+        erros = c.execute("SELECT COUNT(*) FROM resultado WHERE erro IS NOT NULL AND erro<>''").fetchone()[0]
+    return rows, erros
+
+
 def ja_coletados():
+    if usar_supabase():
+        objetos = _listar_supabase("?select=id_transacao,erro")
+        return [r["id_transacao"] for r in objetos if not r.get("erro")]
     with db() as c:
         return [r[0] for r in c.execute("SELECT id_transacao FROM resultado WHERE erro IS NULL OR erro=''")]
 
 
 def gravar(linhas):
     """Upsert do que o navegador coletou. Retorna quantas linhas gravou."""
-    vals = [tuple(str(r.get(k)) if r.get(k) is not None else None for k in COLS) for r in linhas]
+    if not isinstance(linhas, list):
+        raise ValueError("A coleta precisa ser uma lista de transacoes.")
+    objetos = [{k: str(r.get(k)) if r.get(k) is not None else None for k in COLS} for r in linhas]
+    if usar_supabase():
+        if objetos:
+            _supabase("POST", "transacoes", "?on_conflict=id_transacao", objetos,
+                      "resolution=merge-duplicates,return=minimal")
+        return len(objetos)
+    vals = [tuple(r[k] for k in COLS) for r in objetos]
     with db() as c:
         c.executemany(f"INSERT OR REPLACE INTO resultado ({','.join(COLS)})"
                       f" VALUES ({','.join('?' * len(COLS))})", vals)
     return len(vals)
+
+
+def limpar_dados():
+    if usar_supabase():
+        _supabase("DELETE", "transacoes", "?id_transacao=not.is.null", prefer="return=minimal")
+    else:
+        with db() as c:
+            c.execute("DELETE FROM resultado")
 
 
 # ---------- script que roda no console do navegador ----------
@@ -152,7 +224,7 @@ COLETOR = r"""(async () => {
     + out.filter(r => r.erro).length + ' com erro');
 
   try {
-    const res = await fetch('http://localhost:8000/ingest',
+    const res = await fetch(__BASE__ + '/ingest',
       {method: 'POST', headers: {'Content-Type': 'text/plain', 'X-Ingest-Token': '__TOKEN__'}, body: JSON.stringify(out)});
     console.log('%c enviado para o app: ' + (await res.text()) + ' ', 'background:#047857;color:#fff');
   } catch (err) {
@@ -165,9 +237,10 @@ COLETOR = r"""(async () => {
 })()"""
 
 
-def coletor(tudo=False, evento=EVENTO, token=""):
+def coletor(tudo=False, evento=EVENTO, token="", base_url=""):
     return (COLETOR.replace("__EV__", evento)
                    .replace("__TOKEN__", token)
+                   .replace("__BASE__", json.dumps(base_url.rstrip("/")))
                    .replace("__JA__", json.dumps([] if tudo else ja_coletados())))
 
 
@@ -200,118 +273,149 @@ def autenticar_supabase(usuario, senha):
         return False, "Não foi possível conectar ao Supabase."
 
 
-# ---------- servidor ----------
-class H(http.server.BaseHTTPRequestHandler):
-    def _send(self, body, ctype="application/json", extra=None, status=200):
-        if isinstance(body, (dict, list)):
-            body = json.dumps(body, ensure_ascii=False)
-        body = body.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", ctype + "; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "*")
-        self.send_header("Access-Control-Allow-Private-Network", "true")
-        for k, v in (extra or {}).items():
-            self.send_header(k, v)
-        self.end_headers()
-        self.wfile.write(body)
+# ---------- autenticacao stateless ----------
+def _segredo_app():
+    segredo = os.environ.get("APP_SESSION_SECRET", "")
+    if len(segredo) < 32 or "SUBSTITUA" in segredo:
+        raise RuntimeError("Configure APP_SESSION_SECRET com pelo menos 32 caracteres.")
+    return segredo.encode()
 
-    def _usuario(self):
-        try:
-            cookie = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
-            token = cookie.get("pomin_session")
-            if token and token.value in SESSOES:
-                usuario, expira = SESSOES[token.value]
-                if expira > time.time():
-                    return usuario
-                SESSOES.pop(token.value, None)
-        except http.cookies.CookieError:
-            pass
-        return None
 
-    def _nao_autorizado(self):
-        return self._send({"ok": False, "erro": "Autenticação necessária."}, status=401)
+def assinar_token(tipo, sujeito="", segundos=7200):
+    payload = json.dumps({"tipo": tipo, "sub": sujeito, "exp": int(time.time()) + segundos,
+                          "nonce": secrets.token_urlsafe(8)}, separators=(",", ":")).encode()
+    codificado = base64.urlsafe_b64encode(payload).rstrip(b"=")
+    assinatura = hmac.new(_segredo_app(), codificado, hashlib.sha256).digest()
+    return (codificado + b"." + base64.urlsafe_b64encode(assinatura).rstrip(b"=")).decode()
 
-    def do_OPTIONS(self):
-        self._send("", "text/plain", {"Access-Control-Allow-Methods": "GET, POST, OPTIONS"})
 
-    def do_GET(self):
-        u = urllib.parse.urlparse(self.path)
-        q = urllib.parse.parse_qs(u.query)
-        if u.path == "/":
-            return self._send(PAGINA if self._usuario() else LOGIN_PAGE, "text/html")
-        if u.path == "/logout":
-            try:
-                cookie = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
-                if cookie.get("pomin_session"):
-                    SESSOES.pop(cookie["pomin_session"].value, None)
-            except http.cookies.CookieError:
-                pass
-            return self._send("", "text/plain", {"Location": "/", "Set-Cookie": "pomin_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"}, 302)
-        if not self._usuario():
-            return self._nao_autorizado()
-        if u.path == "/coletor.js":
-            token = secrets.token_urlsafe(24)
-            TOKENS_COLETA[token] = time.time() + 7200
-            return self._send(coletor("tudo" in q, q.get("ev", [EVENTO])[0], token), "text/plain")
-        if u.path == "/dados":
-            with db() as c:
-                rows = c.execute(f"SELECT {','.join(COLS)} FROM resultado ORDER BY data DESC").fetchall()
-                erros = c.execute("SELECT COUNT(*) FROM resultado"
-                                  " WHERE erro IS NOT NULL AND erro<>''").fetchone()[0]
-            return self._send({"cols": COLS, "rows": rows, "erros": erros, "evento": EVENTO})
-        if u.path == "/export.csv":
-            buf = io.StringIO()
-            w = csv.writer(buf, delimiter=";", lineterminator="\r\n")
-            w.writerow(COLS)
-            with db() as c:
-                w.writerows(c.execute(f"SELECT {','.join(COLS)} FROM resultado ORDER BY data DESC"))
-            return self._send("﻿" + buf.getvalue(), "text/csv",
-                              {"Content-Disposition": 'attachment; filename="transacoes.csv"'})
-        self.send_error(404)
-
-    def do_POST(self):
-        p = urllib.parse.urlparse(self.path).path
-        body = self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"[]"
-        if p == "/login":
-            try:
-                dados = json.loads(body)
-                usuario, senha = str(dados.get("usuario", "")).strip(), str(dados.get("senha", ""))
-            except (ValueError, TypeError):
-                return self._send({"ok": False, "erro": "Dados inválidos."}, status=400)
-            if not usuario or not senha:
-                return self._send({"ok": False, "erro": "Informe usuário e senha."}, status=400)
-            ok, erro = autenticar_supabase(usuario, senha)
-            if not ok:
-                return self._send({"ok": False, "erro": erro}, status=401)
-            token = secrets.token_urlsafe(32)
-            try:
-                horas = max(1, int(os.environ.get("APP_SESSION_HOURS", "12")))
-            except ValueError:
-                horas = 12
-            SESSOES[token] = (usuario, time.time() + horas * 3600)
-            return self._send({"ok": True}, extra={"Set-Cookie": f"pomin_session={token}; Path=/; Max-Age={horas * 3600}; HttpOnly; SameSite=Lax"})
-        if p == "/ingest":
-            token = self.headers.get("X-Ingest-Token", "")
-            token_ok = TOKENS_COLETA.pop(token, 0) > time.time()
-            if not self._usuario() and not token_ok:
-                return self._nao_autorizado()
-            try:
-                n = gravar(json.loads(body))
-            except Exception as e:
-                return self._send(f"erro: {e}", "text/plain")
-            return self._send(f"{n} linhas gravadas", "text/plain")
-        if p == "/limpar":
-            if not self._usuario():
-                return self._nao_autorizado()
-            with db() as c:
-                c.execute("DELETE FROM resultado")
-            return self._send({"ok": True})
-        self.send_error(404)
-
-    def log_message(self, *a):
+def validar_token(token, tipo):
+    try:
+        codificado, assinatura = token.encode().split(b".", 1)
+        esperado = hmac.new(_segredo_app(), codificado, hashlib.sha256).digest()
+        recebido = base64.urlsafe_b64decode(assinatura + b"=" * (-len(assinatura) % 4))
+        if not hmac.compare_digest(recebido, esperado):
+            return None
+        payload = json.loads(base64.urlsafe_b64decode(codificado + b"=" * (-len(codificado) % 4)))
+        if payload.get("tipo") == tipo and payload.get("exp", 0) > time.time():
+            return payload.get("sub", "") or True
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError, UnicodeError, RuntimeError):
         pass
+    return None
+
+
+def usuario_sessao(request):
+    return validar_token(request.cookies.get("pomin_session", ""), "session")
+
+
+def nao_autorizado():
+    return JSONResponse({"ok": False, "erro": "Autenticacao necessaria."}, status_code=401)
+
+
+def url_publica(request):
+    if os.environ.get("APP_BASE_URL"):
+        return os.environ["APP_BASE_URL"].rstrip("/")
+    protocolo = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip()
+    host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc)).split(",")[0].strip()
+    return f"{protocolo}://{host}"
+
+
+def cookie_seguro(request):
+    return bool(os.environ.get("VERCEL")) or request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+
+
+@app.get("/", response_class=HTMLResponse)
+async def inicio(request: Request):
+    return HTMLResponse(PAGINA if usuario_sessao(request) else LOGIN_PAGE)
+
+
+@app.get("/logout")
+async def logout():
+    resposta = RedirectResponse("/", status_code=302)
+    resposta.delete_cookie("pomin_session", path="/")
+    return resposta
+
+
+@app.post("/login")
+async def login(request: Request):
+    try:
+        dados_login = await request.json()
+        usuario = str(dados_login.get("usuario", "")).strip()
+        senha = str(dados_login.get("senha", ""))
+    except (ValueError, TypeError, AttributeError):
+        return JSONResponse({"ok": False, "erro": "Dados invalidos."}, status_code=400)
+    if not usuario or not senha:
+        return JSONResponse({"ok": False, "erro": "Informe usuario e senha."}, status_code=400)
+    ok, erro = autenticar_supabase(usuario, senha)
+    if not ok:
+        return JSONResponse({"ok": False, "erro": erro}, status_code=401)
+    try:
+        horas = max(1, int(os.environ.get("APP_SESSION_HOURS", "12")))
+        token = assinar_token("session", usuario, horas * 3600)
+    except (ValueError, RuntimeError) as e:
+        return JSONResponse({"ok": False, "erro": str(e)}, status_code=500)
+    resposta = JSONResponse({"ok": True})
+    resposta.set_cookie("pomin_session", token, max_age=horas * 3600, path="/", httponly=True,
+                        samesite="lax", secure=cookie_seguro(request))
+    return resposta
+
+
+@app.get("/coletor.js", response_class=PlainTextResponse)
+async def baixar_coletor(request: Request, tudo: str | None = None, ev: str = EVENTO):
+    if not usuario_sessao(request):
+        return nao_autorizado()
+    token = assinar_token("ingest", segundos=7200)
+    return PlainTextResponse(coletor(tudo is not None, ev, token, url_publica(request)))
+
+
+@app.get("/dados")
+async def obter_dados(request: Request):
+    if not usuario_sessao(request):
+        return nao_autorizado()
+    try:
+        rows, erros = carregar_dados()
+        return JSONResponse({"cols": COLS, "rows": rows, "erros": erros, "evento": EVENTO})
+    except RuntimeError as e:
+        return JSONResponse({"ok": False, "erro": str(e)}, status_code=500)
+
+
+@app.get("/export.csv")
+async def exportar(request: Request):
+    if not usuario_sessao(request):
+        return nao_autorizado()
+    try:
+        rows, _ = carregar_dados()
+    except RuntimeError as e:
+        return JSONResponse({"ok": False, "erro": str(e)}, status_code=500)
+    buf = io.StringIO()
+    w = csv.writer(buf, delimiter=";", lineterminator="\r\n")
+    w.writerow(COLS)
+    w.writerows(rows)
+    return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": 'attachment; filename="transacoes.csv"'})
+
+
+@app.post("/ingest", response_class=PlainTextResponse)
+async def ingest(request: Request):
+    token_ok = validar_token(request.headers.get("X-Ingest-Token", ""), "ingest") is not None
+    if not usuario_sessao(request) and not token_ok:
+        return nao_autorizado()
+    try:
+        n = gravar(await request.json())
+        return PlainTextResponse(f"{n} linhas gravadas")
+    except (ValueError, TypeError, RuntimeError, json.JSONDecodeError) as e:
+        return PlainTextResponse(f"erro: {e}", status_code=400)
+
+
+@app.post("/limpar")
+async def limpar(request: Request):
+    if not usuario_sessao(request):
+        return nao_autorizado()
+    try:
+        limpar_dados()
+        return JSONResponse({"ok": True})
+    except RuntimeError as e:
+        return JSONResponse({"ok": False, "erro": str(e)}, status_code=500)
 
 
 LOGIN_PAGE = r"""<!doctype html><html lang=pt-BR><meta charset=utf-8>
@@ -781,61 +885,12 @@ carregar();setInterval(carregar,5000);
 
 
 def demo():
-    global DB
-    real, DB = DB, os.path.join(DIR, "_test.db")
-    try:
-        os.path.exists(DB) and os.remove(DB)
-        assert gravar([
-            {"id_transacao": "1556034", "nome": "Mauricio", "cpf": "168.113.618-08", "cargo": "CFO",
-             "status": "Aprovada", "status_code": "4", "status_api": "Aprovada", "liquido": "927.21",
-             "desconto": "497", "total": "0", "qtde_tickets": 1,
-             "data": "2026-08-17 08:13:58", "erro": None},
-            {"id_transacao": "1553824", "status": "Iniciada", "status_code": "1", "erro": "attendee vazio"},
-        ]) == 2
-        with db() as c:
-            r = dict(zip(COLS, c.execute("SELECT * FROM resultado WHERE id_transacao='1556034'").fetchone()))
-        assert (r["cpf"], r["cargo"], r["erro"]) == ("168.113.618-08", "CFO", None), r
-        assert r["qtde_tickets"] == "1", "sqlite guarda tudo como texto; o front converte"
-        assert r["desconto"] == "497", "desconto precisa sobreviver ao armazenamento"
-        assert ja_coletados() == ["1556034"], "linha com erro nao pode contar como coletada"
-        js = coletor(token="teste")
-        assert '["1556034"]' in js and "__JA__" not in js and "__EV__" not in js and "__TOKEN__" not in js
-        assert "'X-Ingest-Token': 'teste'" in js
-        assert "new Set([])" in coletor(tudo=True), "recoletar tudo deve ignorar o ja coletado"
-    finally:
-        os.path.exists(DB) and os.remove(DB)
-        DB = real
-    real_open = urllib.request.urlopen
-    env_antigo = {k: os.environ.get(k) for k in ("SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY")}
-    try:
-        os.environ.update(SUPABASE_URL="https://teste.supabase.co", SUPABASE_PUBLISHABLE_KEY="sb_publishable_teste")
-        def resposta_rpc(req, timeout=0):
-            assert req.get_header("Content-profile") == "appticket", "RPC deve usar o schema configurado"
-            return contextlib.closing(io.BytesIO(b"true"))
-        urllib.request.urlopen = resposta_rpc
-        assert autenticar_supabase("usuario", "senha")[0], "RPC verdadeira deve autenticar"
-        SESSOES["teste"] = ("usuario", time.time() + 60)
-        pedido = object.__new__(H)
-        pedido.headers = {"Cookie": "pomin_session=teste"}
-        assert pedido._usuario() == "usuario", "cookie de sessao valido deve liberar o acesso"
-    finally:
-        urllib.request.urlopen = real_open
-        SESSOES.pop("teste", None)
-        for chave, valor in env_antigo.items():
-            if valor is None:
-                os.environ.pop(chave, None)
-            else:
-                os.environ[chave] = valor
-    print("ok")
+    import unittest
+    suite = unittest.defaultTestLoader.discover(DIR, pattern="test_*.py")
+    if not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful():
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
     if "test" in sys.argv:
         demo()
-    else:
-        with db():
-            pass
-        print("http://localhost:8000  (Ctrl+C para parar)")
-        srv = http.server.ThreadingHTTPServer
-        srv.allow_reuse_address = False  # no Windows o padrao deixa 2 servidores na mesma porta
-        srv(("127.0.0.1", 8000), H).serve_forever()

@@ -20,7 +20,7 @@ alter table appticket.senhas enable row level security;
 
 revoke all on appticket.usuarios from public, anon, authenticated;
 revoke all on appticket.senhas from public, anon, authenticated;
-grant usage on schema appticket to anon, authenticated;
+grant usage on schema appticket to anon, authenticated, service_role;
 
 create or replace function appticket.autenticar_usuario(p_usuario text, p_senha text)
 returns boolean

@@ -6,4 +6,4 @@ dados.db.bak-*
 dados_completos.json
 *.csv
 informações.md
-.vercel/
+_test.db
