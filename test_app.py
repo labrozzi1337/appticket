@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -139,6 +140,25 @@ class PainelTest(unittest.TestCase):
         with patch("urllib.request.urlopen", abrir):
             self.assertEqual(painel._supabase("GET", "transacoes", "?select=id_transacao"), [])
 
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("indisponivel")):
+            with self.assertRaisesRegex(RuntimeError, "conectar ao Supabase"):
+                painel._supabase("GET", "transacoes")
+
+    def test_supabase_grava_coleta_em_lotes(self):
+        os.environ["STORAGE_BACKEND"] = "supabase"
+        lotes = []
+        with patch.object(painel, "_supabase", side_effect=lambda *args, **kwargs: lotes.append(args[3])):
+            self.assertEqual(painel.gravar([{"id_transacao": str(i)} for i in range(464)]), 464)
+        self.assertEqual([len(lote) for lote in lotes], [150, 150, 150, 14])
+
+    def test_erro_inesperado_no_ingest_mantem_cors(self):
+        self.login()
+        with patch.object(painel, "gravar", side_effect=OSError("falha inesperada")):
+            resposta = self.client.post("/ingest", json=[])
+        self.assertEqual(resposta.status_code, 500)
+        self.assertEqual(resposta.headers["access-control-allow-origin"], "*")
+        self.assertIn("consulte os logs", resposta.text)
+
     def test_dashboard_filtros_e_regras_permanecem_presentes(self):
         fonte = painel.PAGINA
         for trecho in (
@@ -146,6 +166,7 @@ class PainelTest(unittest.TestCase):
             "STATUS_SEL=new Set()", "function filtraTabela()", "function exportaFiltrado()",
             "num(r[col(discKey)])>0&&num(r[col('total')])===0", "const ticketsEmitidos=ap.reduce",
             "const checkoutVazio=", "Visão executiva", "Coletar dados",
+            'id=lnk href="https://appticket.com.br/areaProdutor/lista/participantes/?ev=36766&amp;origin=new"',
         ):
             self.assertIn(trecho, fonte)
 

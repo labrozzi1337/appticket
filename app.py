@@ -95,6 +95,8 @@ def _supabase(method, recurso, query="", body=None, prefer=None, alcance=None):
     except urllib.error.HTTPError as e:
         detalhe = e.read().decode("utf-8", "replace")
         raise RuntimeError(f"Supabase retornou HTTP {e.code}: {detalhe[:500]}") from e
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        raise RuntimeError(f"Nao foi possivel conectar ao Supabase: {e}") from e
 
 
 def _listar_supabase(query):
@@ -133,8 +135,8 @@ def gravar(linhas):
         raise ValueError("A coleta precisa ser uma lista de transacoes.")
     objetos = [{k: str(r.get(k)) if r.get(k) is not None else None for k in COLS} for r in linhas]
     if usar_supabase():
-        if objetos:
-            _supabase("POST", "transacoes", "?on_conflict=id_transacao", objetos,
+        for inicio in range(0, len(objetos), 150):
+            _supabase("POST", "transacoes", "?on_conflict=id_transacao", objetos[inicio:inicio + 150],
                       "resolution=merge-duplicates,return=minimal")
         return len(objetos)
     vals = [tuple(r[k] for k in COLS) for r in objetos]
@@ -226,9 +228,11 @@ COLETOR = r"""(async () => {
   try {
     const res = await fetch(__BASE__ + '/ingest',
       {method: 'POST', headers: {'Content-Type': 'text/plain', 'X-Ingest-Token': '__TOKEN__'}, body: JSON.stringify(out)});
-    console.log('%c enviado para o app: ' + (await res.text()) + ' ', 'background:#047857;color:#fff');
+    const resposta = await res.text();
+    if (!res.ok) throw new Error('app respondeu HTTP ' + res.status + ': ' + resposta);
+    console.log('%c enviado para o app: ' + resposta + ' ', 'background:#047857;color:#fff');
   } catch (err) {
-    console.warn('app local inacessivel, baixando coleta.json - importe pelo app', err);
+    console.warn('app inacessivel, baixando coleta.json para importacao manual', err);
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([JSON.stringify(out)], {type: 'application/json'}));
     a.download = 'coleta.json';
@@ -404,7 +408,12 @@ async def ingest(request: Request):
         n = gravar(await request.json())
         return PlainTextResponse(f"{n} linhas gravadas")
     except (ValueError, TypeError, RuntimeError, json.JSONDecodeError) as e:
-        return PlainTextResponse(f"erro: {e}", status_code=400)
+        return PlainTextResponse(f"erro: {e}", status_code=400,
+                                 headers={"Access-Control-Allow-Origin": "*"})
+    except Exception as e:
+        print(f"Erro inesperado no ingest: {type(e).__name__}: {e}", file=sys.stderr)
+        return PlainTextResponse("erro interno ao gravar a coleta; consulte os logs da Vercel",
+                                 status_code=500, headers={"Access-Control-Allow-Origin": "*"})
 
 
 @app.post("/limpar")
@@ -535,7 +544,7 @@ dialog{border:1px solid hsl(var(--line));border-radius:8px;padding:0;max-width:6
     <p>Três passos para atualizar o dashboard e a lista de transações.</p></div></div>
   <div class=notice><div><b>Antes de começar, recomendamos apagar a coleta anterior</b><small>Isso evita mistura entre execuções e é a forma mais segura de garantir uma atualização completa.</small></div><button class="b r" onclick=limpar()>Apagar dados atuais</button></div>
   <div class=wizard>
-    <article class=step><h3>Abra o painel da AppTicket</h3><p>Entre logado e mantenha esta aplicação aberta em outra aba.</p><a id=lnk target=_blank rel=noopener>Abrir página de participantes ↗</a></article>
+    <article class=step><h3>Abra o painel da AppTicket</h3><p>Entre logado e mantenha esta aplicação aberta em outra aba.</p><a id=lnk href="https://appticket.com.br/areaProdutor/lista/participantes/?ev=36766&amp;origin=new" target=_blank rel=noopener>Abrir página de participantes ↗</a></article>
     <article class=step><h3>Copie o script</h3><p>Use a coleta completa após apagar. Para complementar uma base existente, copie apenas os novos.</p><button class=b onclick=copiar(1)>Copiar coleta completa</button> <button class="b sec" onclick=copiar(0)>Só novos</button><p id=msg aria-live=polite></p></article>
     <article class=step><h3>Cole no Console</h3><p>Na página da AppTicket, pressione <b>F12</b>, abra <b>Console</b>, cole com <b>Ctrl+V</b> e pressione <b>Enter</b>. Os dados voltarão para cá automaticamente.</p></article>
   </div>
