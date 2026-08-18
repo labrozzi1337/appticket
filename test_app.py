@@ -166,7 +166,7 @@ class PainelTest(unittest.TestCase):
             "STATUS_SEL=new Set()", "function filtraTabela()", "function exportaFiltrado()",
             "num(r[col(discKey)])>0&&num(r[col('total')])===0", "const ticketsEmitidos=ap.reduce",
             "const checkoutVazio=", "Visão executiva", "Coletar dados",
-            'id=lnk href="https://appticket.com.br/areaProdutor/lista/participantes/?ev=36766&amp;origin=new"',
+            'id=lnk href="https://appticket.com.br/areaProdutor/lista/participantes/?ev=36766&origin=new"',
         ):
             self.assertIn(trecho, fonte)
 

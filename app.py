@@ -544,7 +544,7 @@ dialog{border:1px solid hsl(var(--line));border-radius:8px;padding:0;max-width:6
     <p>Três passos para atualizar o dashboard e a lista de transações.</p></div></div>
   <div class=notice><div><b>Antes de começar, recomendamos apagar a coleta anterior</b><small>Isso evita mistura entre execuções e é a forma mais segura de garantir uma atualização completa.</small></div><button class="b r" onclick=limpar()>Apagar dados atuais</button></div>
   <div class=wizard>
-    <article class=step><h3>Abra o painel da AppTicket</h3><p>Entre logado e mantenha esta aplicação aberta em outra aba.</p><a id=lnk href="https://appticket.com.br/areaProdutor/lista/participantes/?ev=36766&amp;origin=new" target=_blank rel=noopener>Abrir página de participantes ↗</a></article>
+    <article class=step><h3>Abra o painel da AppTicket</h3><p>Entre logado e mantenha esta aplicação aberta em outra aba.</p><a id=lnk href="https://appticket.com.br/areaProdutor/lista/participantes/?ev=36766&origin=new" target=_blank rel=noopener>Abrir página de participantes ↗</a></article>
     <article class=step><h3>Copie o script</h3><p>Use a coleta completa após apagar. Para complementar uma base existente, copie apenas os novos.</p><button class=b onclick=copiar(1)>Copiar coleta completa</button> <button class="b sec" onclick=copiar(0)>Só novos</button><p id=msg aria-live=polite></p></article>
     <article class=step><h3>Cole no Console</h3><p>Na página da AppTicket, pressione <b>F12</b>, abra <b>Console</b>, cole com <b>Ctrl+V</b> e pressione <b>Enter</b>. Os dados voltarão para cá automaticamente.</p></article>
   </div>
@@ -876,7 +876,6 @@ async function limpar(){
 async function carregar(){
   if(dlg.open||lst.open)return;            // nao redesenha por baixo de um modal aberto
   D=await (await fetch('/dados')).json();R=D.rows;
-  lnk.href='https://appticket.com.br/areaProdutor/lista/participantes/?ev='+D.evento+'&origin=new';
   hint.textContent=R.length?R.length+' transações coletadas':'Nenhum dado coletado';
   const novo=R.length+'|'+D.erros;
   if(novo==sig)return;                     // sem dado novo: nao reanima os graficos
