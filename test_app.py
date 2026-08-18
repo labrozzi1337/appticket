@@ -117,7 +117,7 @@ class PainelTest(unittest.TestCase):
         self.assertIn("Secure", self.login().headers["set-cookie"])
 
     def test_vercel_escolhe_supabase_sem_escrita_sqlite(self):
-        os.environ.pop("STORAGE_BACKEND", None)
+        os.environ["STORAGE_BACKEND"] = "sqlite"
         os.environ["VERCEL"] = "1"
         self.assertTrue(painel.usar_supabase())
 

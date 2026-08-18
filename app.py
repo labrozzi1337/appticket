@@ -68,7 +68,7 @@ def db():
 
 def usar_supabase():
     """Na Vercel o filesystem e efemero; localmente o SQLite continua disponivel."""
-    return os.environ.get("STORAGE_BACKEND", "supabase" if os.environ.get("VERCEL") else "sqlite").lower() == "supabase"
+    return bool(os.environ.get("VERCEL")) or os.environ.get("STORAGE_BACKEND", "sqlite").lower() == "supabase"
 
 
 def _supabase(method, recurso, query="", body=None, prefer=None, alcance=None):
